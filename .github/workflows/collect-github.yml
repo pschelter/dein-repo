@@ -2,36 +2,36 @@ name: Collect GBFS Snapshot
 
 on:
   schedule:
-  - cron: "*/5 * * * *"
-workflow_dispatch:
-  
-  permissions:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
   contents: write
 
 jobs:
   collect:
-  runs-on: ubuntu-latest
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Repository auschecken
-uses: actions/checkout@v4
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
 
-- name: R einrichten
-uses: r-lib/actions/setup-r@v2
+      - name: R einrichten
+        uses: r-lib/actions/setup-r@v2
 
-- name: Abhängigkeiten installieren
-run: |
-  Rscript -e 'install.packages(c("jsonlite","dplyr","tibble","purrr","readr","lubridate","tidyr"), repos="https://cloud.r-project.org")'
+      - name: Abhängigkeiten installieren
+        run: |
+          Rscript -e 'install.packages(c("jsonlite","dplyr","tibble","purrr","readr","lubridate","tidyr"), repos="https://cloud.r-project.org")'
 
-- name: Snapshot erstellen
-run: |
-  mkdir -p data
-Rscript collector.R
+      - name: Snapshot erstellen
+        run: |
+          mkdir -p data
+          Rscript collector.R
 
-- name: Änderungen committen
-run: |
-  git config user.name "github-actions[bot]"
-git config user.email "github-actions[bot]@users.noreply.github.com"
-git add data/*.csv
-git commit -m "Add GBFS snapshot" || echo "No changes to commit"
-git push
+      - name: Änderungen committen
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/*.csv
+          git commit -m "Add GBFS snapshot" || echo "No changes to commit"
+          git push
