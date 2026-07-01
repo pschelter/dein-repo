@@ -1,5 +1,3 @@
-# .github/workflows/collect-gbfs.yml
-
 name: Collect GBFS Snapshot
 
 on:
