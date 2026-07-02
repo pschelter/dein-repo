@@ -2,7 +2,7 @@ name: GBFS-Snapshot sammeln
 
 on:
   schedule:
-    - cron: "17 */3 * * *"
+    - cron: "13 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 175
+    timeout-minutes: 70
 
     steps:
       - name: Repository auschecken
@@ -31,9 +31,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          for i in {1..34}
+          for i in {1..12}
           do
-            echo "Starte Snapshot $i von 34"
+            echo "Starte Snapshot $i von 12"
             Rscript collector.R
 
             git pull --rebase origin main || true
@@ -41,6 +41,8 @@ jobs:
             git commit -m "Add GBFS snapshot $i" || echo "No changes to commit"
             git push || true
 
-            echo "Warte 5 Minuten..."
-            sleep 300
+            if [ "$i" -lt 12 ]; then
+              echo "Warte 5 Minuten..."
+              sleep 300
+            fi
           done

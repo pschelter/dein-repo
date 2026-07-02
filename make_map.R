@@ -15,7 +15,6 @@ packages_needed <- c(
   "htmlwidgets",
   "htmltools"
 )
-
 packages_missing <- packages_needed[
   !packages_needed %in% installed.packages()[, "Package"]
 ]
@@ -37,17 +36,57 @@ library(htmltools)
 # Einstellungen
 # ------------------------------------------------------------
 
-data_dir <- "data"
-output_dir <- "output"
+setwd("C:/Users/piuss/Hochschule Rhein-Main/Vorlesungen/4-Datenmanagement,-analyse,-visualisierung/Ausarbeitung Grotemeier/Github_Repository/dein-repo")
 
+# ------------------------------------------------------------
+# Robuste Pfade und Einstellungen
+# ------------------------------------------------------------
+
+find_repo_data_dir <- function() {
+  candidates <- c(
+    file.path(getwd(), "data"),
+    file.path(dirname(normalizePath(getwd(), winslash = "/", mustWork = FALSE)), "data")
+  )
+  
+  # Falls das Skript mit Rscript make_map.R gestartet wird
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- grep("^--file=", args, value = TRUE)
+  
+  if (length(file_arg) > 0) {
+    script_path <- sub("^--file=", "", file_arg[[1]])
+    script_dir <- dirname(normalizePath(script_path, winslash = "/", mustWork = FALSE))
+    
+    candidates <- c(
+      file.path(script_dir, "data"),
+      candidates
+    )
+  }
+  
+  candidates <- unique(normalizePath(candidates, winslash = "/", mustWork = FALSE))
+  
+  existing <- candidates[dir.exists(candidates)]
+  
+  if (length(existing) > 0) {
+    return(existing[[1]])
+  }
+  
+  stop(
+    "Kein data-Ordner gefunden.\n",
+    "Aktuelles Arbeitsverzeichnis ist:\n",
+    getwd(), "\n\n",
+    "Bitte starte R im Repo-Hauptordner oder setze data_dir manuell."
+  )
+}
+
+data_dir <- find_repo_data_dir()
+
+output_dir <- file.path(dirname(data_dir), "output")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
-file_pattern <- "^vancouver_gbfs_vehicle_locations_.*\\.csv$"
+# Akzeptiert Dateien mit und ohne .csv-Endung
+file_pattern <- "^vancouver_gbfs_vehicle_locations_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}(\\.csv)?$"
 
-# Erwartet sind ca. 5 Minuten Abstand.
-# Alles darüber wird als Lücke dokumentiert.
 gap_threshold_minutes <- 7.5
-
 local_tz <- "America/Vancouver"
 
 map_file <- file.path(output_dir, "gbfs_tracks_map.html")
@@ -55,6 +94,9 @@ collection_gaps_file <- file.path(output_dir, "collection_gaps.csv")
 vehicle_gaps_file <- file.path(output_dir, "vehicle_gaps.csv")
 snapshot_overview_file <- file.path(output_dir, "snapshot_overview.csv")
 
+message("Arbeitsverzeichnis: ", getwd())
+message("Verwende data_dir: ", data_dir)
+message("Verwende output_dir: ", output_dir)
 # ------------------------------------------------------------
 # Hilfsfunktionen
 # ------------------------------------------------------------
@@ -105,6 +147,7 @@ extract_local_time_from_filename <- function(file) {
 
 read_one_snapshot <- function(file) {
   dt <- fread(file, showProgress = FALSE)
+  dt <- data.table::as.data.table(dt)
   
   dt[, source_file := basename(file)]
   
@@ -116,20 +159,23 @@ read_one_snapshot <- function(file) {
   }
   
   if (!"snapshot_time_vancouver" %in% names(dt)) {
-    dt[, snapshot_time_vancouver := with_tz(snapshot_time_utc, local_tz)]
+    dt[, snapshot_time_vancouver := lubridate::with_tz(snapshot_time_utc, local_tz)]
   } else {
     parsed_local <- suppressWarnings(
-      ymd_hms(as.character(snapshot_time_vancouver), tz = local_tz, quiet = TRUE)
+      lubridate::ymd_hms(as.character(dt[["snapshot_time_vancouver"]]), tz = local_tz, quiet = TRUE)
     )
     
     missing_idx <- is.na(parsed_local)
     
     if (any(missing_idx)) {
-      parsed_local[missing_idx] <- with_tz(
+      parsed_local[missing_idx] <- lubridate::with_tz(
         snapshot_time_utc[missing_idx],
         local_tz
       )
     }
+    
+    dt[, snapshot_time_vancouver := parsed_local]
+  }
     
     dt[, snapshot_time_vancouver := parsed_local]
   }
@@ -186,33 +232,53 @@ make_linestring_safe <- function(lon, lat) {
 # Dateien einlesen
 # ------------------------------------------------------------
 
-files <- list.files(
+# ------------------------------------------------------------
+# Dateien robust einlesen
+# ------------------------------------------------------------
+
+all_files <- list.files(
   data_dir,
-  pattern = file_pattern,
-  full.names = TRUE
+  full.names = TRUE,
+  recursive = FALSE,
+  all.files = FALSE,
+  no.. = TRUE
 )
 
+all_file_names <- basename(all_files)
+
+files <- all_files[
+  grepl(file_pattern, all_file_names, ignore.case = TRUE)
+]
+
 if (length(files) == 0) {
-  stop("Keine passenden CSV-Dateien in 'data/' gefunden.")
+  message("Im data-Ordner wurden folgende Dateien gefunden:")
+  print(all_file_names)
+  
+  stop(
+    "Keine passenden GBFS-Snapshot-Dateien gefunden.\n\n",
+    "Gesuchtes Muster:\n",
+    file_pattern, "\n\n",
+    "Verwendeter data-Ordner:\n",
+    data_dir, "\n\n",
+    "Aktuelles Arbeitsverzeichnis:\n",
+    getwd(), "\n\n",
+    "Hinweis: Die Dateien müssen ungefähr so heißen:\n",
+    "vancouver_gbfs_vehicle_locations_2026-07-01_16-07-44.csv\n",
+    "oder ohne sichtbare Endung:\n",
+    "vancouver_gbfs_vehicle_locations_2026-07-01_16-07-44"
+  )
 }
 
-message("Lese ", length(files), " Snapshot-Dateien ...")
+files <- sort(files)
 
-raw <- rbindlist(
+message("Gefundene Snapshot-Dateien: ", length(files))
+message("Erste Datei: ", basename(files[[1]]))
+message("Letzte Datei: ", basename(files[[length(files)]]))
+
+raw <- data.table::rbindlist(
   lapply(files, read_one_snapshot),
   fill = TRUE
 )
-
-required_cols <- c("provider", "vehicle_key", "vehicle_id", "lat", "lon", "snapshot_time_utc")
-
-missing_required <- setdiff(required_cols, names(raw))
-
-if (length(missing_required) > 0) {
-  stop(
-    "Diese benötigten Spalten fehlen: ",
-    paste(missing_required, collapse = ", ")
-  )
-}
 
 # ------------------------------------------------------------
 # Daten bereinigen
