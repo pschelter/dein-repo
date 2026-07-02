@@ -2,7 +2,7 @@ name: GBFS-Snapshot sammeln
 
 on:
   schedule:
-    - cron: "13 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
