@@ -1,8 +1,8 @@
-name: Collect GBFS Snapshot
+name: GBFS-Snapshot sammeln
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "7 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
 
     steps:
       - name: Repository auschecken
@@ -23,15 +24,23 @@ jobs:
         run: |
           Rscript -e 'install.packages(c("jsonlite","dplyr","tibble","purrr","readr","lubridate","tidyr"), repos="https://cloud.r-project.org")'
 
-      - name: Snapshot erstellen
+      - name: Alle 5 Minuten Snapshots sammeln
         run: |
           mkdir -p data
-          Rscript collector.R
 
-      - name: Änderungen committen
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/*.csv
-          git commit -m "Add GBFS snapshot" || echo "No changes to commit"
-          git push
+          for i in {1..70}
+          do
+            echo "Starte Snapshot $i von 70"
+            Rscript collector.R
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            git pull --rebase origin main || true
+            git add data/*.csv
+            git commit -m "Add GBFS snapshot $i" || echo "No changes to commit"
+            git push || true
+
+            echo "Warte 5 Minuten..."
+            sleep 300
+          done
