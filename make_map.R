@@ -1,20 +1,16 @@
-# make_map.R
-# Erstellt:
-# - output/gbfs_tracks_map.html
-# - output/collection_gaps.csv
-# - output/vehicle_gaps.csv
-# - output/snapshot_overview.csv
+# animated_tracks_map.R
 
 packages_needed <- c(
   "data.table",
-  "dplyr",
   "lubridate",
   "stringr",
-  "sf",
-  "leaflet",
+  "plotly",
   "htmlwidgets",
-  "htmltools"
+  "ggplot2",
+  "gganimate",
+  "gifski"
 )
+
 packages_missing <- packages_needed[
   !packages_needed %in% installed.packages()[, "Package"]
 ]
@@ -24,161 +20,83 @@ if (length(packages_missing) > 0) {
 }
 
 library(data.table)
-library(dplyr)
 library(lubridate)
 library(stringr)
-library(sf)
-library(leaflet)
+library(plotly)
 library(htmlwidgets)
-library(htmltools)
+library(ggplot2)
+library(gganimate)
+library(gifski)
 
 # ------------------------------------------------------------
 # Einstellungen
 # ------------------------------------------------------------
 
-setwd("C:/Users/piuss/Hochschule Rhein-Main/Vorlesungen/4-Datenmanagement,-analyse,-visualisierung/Ausarbeitung Grotemeier/Github_Repository/dein-repo")
+data_dir <- data_dir <- "C:/Users/piuss/Hochschule Rhein-Main/Vorlesungen/4-Datenmanagement,-analyse,-visualisierung/Ausarbeitung Grotemeier/Github_Repository/dein-repo/data"
+output_dir <- "C:/Users/piuss/Hochschule Rhein-Main/Vorlesungen/4-Datenmanagement,-analyse,-visualisierung/Ausarbeitung Grotemeier/Github_Repository/dein-repo/output"
 
-# ------------------------------------------------------------
-# Robuste Pfade und Einstellungen
-# ------------------------------------------------------------
-
-find_repo_data_dir <- function() {
-  candidates <- c(
-    file.path(getwd(), "data"),
-    file.path(dirname(normalizePath(getwd(), winslash = "/", mustWork = FALSE)), "data")
-  )
-  
-  # Falls das Skript mit Rscript make_map.R gestartet wird
-  args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- grep("^--file=", args, value = TRUE)
-  
-  if (length(file_arg) > 0) {
-    script_path <- sub("^--file=", "", file_arg[[1]])
-    script_dir <- dirname(normalizePath(script_path, winslash = "/", mustWork = FALSE))
-    
-    candidates <- c(
-      file.path(script_dir, "data"),
-      candidates
-    )
-  }
-  
-  candidates <- unique(normalizePath(candidates, winslash = "/", mustWork = FALSE))
-  
-  existing <- candidates[dir.exists(candidates)]
-  
-  if (length(existing) > 0) {
-    return(existing[[1]])
-  }
-  
-  stop(
-    "Kein data-Ordner gefunden.\n",
-    "Aktuelles Arbeitsverzeichnis ist:\n",
-    getwd(), "\n\n",
-    "Bitte starte R im Repo-Hauptordner oder setze data_dir manuell."
-  )
-}
-
-data_dir <- find_repo_data_dir()
-
-output_dir <- file.path(dirname(data_dir), "output")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Akzeptiert Dateien mit und ohne .csv-Endung
-file_pattern <- "^vancouver_gbfs_vehicle_locations_\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}(\\.csv)?$"
+output_file <- file.path(output_dir, "animated_gbfs_tracks_map.html")
 
-gap_threshold_minutes <- 7.5
 local_tz <- "America/Vancouver"
+gap_threshold_minutes <- 7.5
 
-map_file <- file.path(output_dir, "gbfs_tracks_map.html")
-collection_gaps_file <- file.path(output_dir, "collection_gaps.csv")
-vehicle_gaps_file <- file.path(output_dir, "vehicle_gaps.csv")
-snapshot_overview_file <- file.path(output_dir, "snapshot_overview.csv")
-
-message("Arbeitsverzeichnis: ", getwd())
-message("Verwende data_dir: ", data_dir)
-message("Verwende output_dir: ", output_dir)
 # ------------------------------------------------------------
-# Hilfsfunktionen
+# Dateien finden
 # ------------------------------------------------------------
 
-parse_time_utc <- function(x) {
-  if (inherits(x, "POSIXct")) {
-    return(with_tz(x, "UTC"))
-  }
-  
-  x_chr <- as.character(x)
-  
-  parsed <- suppressWarnings(ymd_hms(x_chr, tz = "UTC", quiet = TRUE))
-  
-  missing_idx <- is.na(parsed)
-  if (any(missing_idx)) {
-    parsed[missing_idx] <- suppressWarnings(
-      ymd_hm(x_chr[missing_idx], tz = "UTC", quiet = TRUE)
-    )
-  }
-  
-  parsed
+files <- list.files(
+  data_dir,
+  pattern = "^vancouver_gbfs_vehicle_locations_.*\\.csv$",
+  full.names = TRUE
+)
+
+files <- sort(files)
+
+if (length(files) == 0) {
+  stop("Keine CSV-Dateien im data-Ordner gefunden.")
 }
 
-extract_local_time_from_filename <- function(file) {
-  base <- basename(file)
+message("Gefundene Dateien: ", length(files))
+
+# ------------------------------------------------------------
+# Zeit aus Dateiname lesen
+# ------------------------------------------------------------
+
+extract_time_from_filename <- function(file) {
+  filename <- basename(file)
   
-  timestamp_raw <- str_match(
-    base,
+  raw_time <- stringr::str_match(
+    filename,
     "vancouver_gbfs_vehicle_locations_(\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2})\\.csv"
   )[, 2]
   
-  if (is.na(timestamp_raw)) {
-    return(as.POSIXct(NA))
-  }
-  
-  timestamp_clean <- str_replace(
-    timestamp_raw,
+  clean_time <- stringr::str_replace(
+    raw_time,
     "^(\\d{4}-\\d{2}-\\d{2})_(\\d{2})-(\\d{2})-(\\d{2})$",
     "\\1 \\2:\\3:\\4"
   )
   
-  # Dateiname wurde bei dir aus Vancouver-Ortszeit erzeugt.
-  force_tz(
-    ymd_hms(timestamp_clean, quiet = TRUE),
+  lubridate::force_tz(
+    lubridate::ymd_hms(clean_time),
     tzone = local_tz
   )
 }
 
-read_one_snapshot <- function(file) {
-  dt <- fread(file, showProgress = FALSE)
+# ------------------------------------------------------------
+# Einzelne Datei einlesen
+# ------------------------------------------------------------
+
+read_one_file <- function(file) {
+  dt <- data.table::fread(file, showProgress = FALSE)
   dt <- data.table::as.data.table(dt)
   
+  file_time_local <- extract_time_from_filename(file)
+  
   dt[, source_file := basename(file)]
-  
-  if (!"snapshot_time_utc" %in% names(dt)) {
-    file_time_local <- extract_local_time_from_filename(file)
-    dt[, snapshot_time_utc := with_tz(file_time_local, "UTC")]
-  } else {
-    dt[, snapshot_time_utc := parse_time_utc(snapshot_time_utc)]
-  }
-  
-  if (!"snapshot_time_vancouver" %in% names(dt)) {
-    dt[, snapshot_time_vancouver := lubridate::with_tz(snapshot_time_utc, local_tz)]
-  } else {
-    parsed_local <- suppressWarnings(
-      lubridate::ymd_hms(as.character(dt[["snapshot_time_vancouver"]]), tz = local_tz, quiet = TRUE)
-    )
-    
-    missing_idx <- is.na(parsed_local)
-    
-    if (any(missing_idx)) {
-      parsed_local[missing_idx] <- lubridate::with_tz(
-        snapshot_time_utc[missing_idx],
-        local_tz
-      )
-    }
-    
-    dt[, snapshot_time_vancouver := parsed_local]
-  }
-    
-    dt[, snapshot_time_vancouver := parsed_local]
-  }
+  dt[, snapshot_time_vancouver := file_time_local]
+  dt[, snapshot_time_utc := lubridate::with_tz(file_time_local, "UTC")]
   
   if (!"vehicle_key" %in% names(dt)) {
     dt[, vehicle_key := NA_character_]
@@ -192,7 +110,6 @@ read_one_snapshot <- function(file) {
     dt[, provider := NA_character_]
   }
   
-  # Fallback, falls vehicle_key fehlt.
   dt[
     is.na(vehicle_key) & !is.na(provider) & !is.na(vehicle_id),
     vehicle_key := paste(provider, vehicle_id, sep = "_")
@@ -201,445 +118,237 @@ read_one_snapshot <- function(file) {
   dt
 }
 
-format_local <- function(x) {
-  format(with_tz(x, local_tz), "%Y-%m-%d %H:%M:%S %Z")
-}
-
-make_linestring_safe <- function(lon, lat) {
-  coords <- cbind(lon, lat)
-  
-  coords <- coords[
-    !is.na(coords[, 1]) &
-      !is.na(coords[, 2]) &
-      is.finite(coords[, 1]) &
-      is.finite(coords[, 2]),
-    ,
-    drop = FALSE
-  ]
-  
-  if (nrow(coords) < 2) {
-    return(NULL)
-  }
-  
-  if (nrow(unique(coords)) < 2) {
-    return(NULL)
-  }
-  
-  st_linestring(coords)
-}
-
 # ------------------------------------------------------------
-# Dateien einlesen
+# Daten laden
 # ------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Dateien robust einlesen
-# ------------------------------------------------------------
-
-all_files <- list.files(
-  data_dir,
-  full.names = TRUE,
-  recursive = FALSE,
-  all.files = FALSE,
-  no.. = TRUE
-)
-
-all_file_names <- basename(all_files)
-
-files <- all_files[
-  grepl(file_pattern, all_file_names, ignore.case = TRUE)
-]
-
-if (length(files) == 0) {
-  message("Im data-Ordner wurden folgende Dateien gefunden:")
-  print(all_file_names)
-  
-  stop(
-    "Keine passenden GBFS-Snapshot-Dateien gefunden.\n\n",
-    "Gesuchtes Muster:\n",
-    file_pattern, "\n\n",
-    "Verwendeter data-Ordner:\n",
-    data_dir, "\n\n",
-    "Aktuelles Arbeitsverzeichnis:\n",
-    getwd(), "\n\n",
-    "Hinweis: Die Dateien müssen ungefähr so heißen:\n",
-    "vancouver_gbfs_vehicle_locations_2026-07-01_16-07-44.csv\n",
-    "oder ohne sichtbare Endung:\n",
-    "vancouver_gbfs_vehicle_locations_2026-07-01_16-07-44"
-  )
-}
-
-files <- sort(files)
-
-message("Gefundene Snapshot-Dateien: ", length(files))
-message("Erste Datei: ", basename(files[[1]]))
-message("Letzte Datei: ", basename(files[[length(files)]]))
-
-raw <- data.table::rbindlist(
-  lapply(files, read_one_snapshot),
+dt <- data.table::rbindlist(
+  lapply(files, read_one_file),
   fill = TRUE
 )
-
-# ------------------------------------------------------------
-# Daten bereinigen
-# ------------------------------------------------------------
-
-dt <- copy(raw)
 
 dt[, lat := suppressWarnings(as.numeric(lat))]
 dt[, lon := suppressWarnings(as.numeric(lon))]
 
 dt <- dt[
-  !is.na(snapshot_time_utc) &
-    !is.na(lat) &
+  !is.na(lat) &
     !is.na(lon) &
     lat >= -90 &
     lat <= 90 &
     lon >= -180 &
-    lon <= 180
-]
-
-# Doppelte Zeilen entfernen
-dt <- unique(
-  dt,
-  by = c(
-    "provider",
-    "vehicle_key",
-    "vehicle_id",
-    "lat",
-    "lon",
-    "snapshot_time_utc"
-  )
-)
-
-dt[, snapshot_time_vancouver := with_tz(snapshot_time_utc, local_tz)]
-
-setorder(dt, snapshot_time_utc, provider, vehicle_key)
-
-if (nrow(dt) == 0) {
-  stop("Nach der Bereinigung sind keine gültigen Fahrzeugpositionen übrig.")
-}
-
-# ------------------------------------------------------------
-# Snapshot-Übersicht und globale Sammellücken
-# ------------------------------------------------------------
-
-snapshot_overview <- dt[
-  ,
-  .(
-    vehicles = .N,
-    providers = paste(sort(unique(provider)), collapse = ", "),
-    source_files = paste(sort(unique(source_file)), collapse = ", ")
-  ),
-  by = snapshot_time_utc
-][order(snapshot_time_utc)]
-
-snapshot_overview[, snapshot_time_vancouver := with_tz(snapshot_time_utc, local_tz)]
-snapshot_overview[, previous_snapshot_time_utc := shift(snapshot_time_utc)]
-snapshot_overview[, gap_minutes := as.numeric(
-  difftime(snapshot_time_utc, previous_snapshot_time_utc, units = "mins")
-)]
-
-snapshot_overview_export <- copy(snapshot_overview)
-snapshot_overview_export[, snapshot_time_utc := format(snapshot_time_utc, "%Y-%m-%d %H:%M:%S UTC")]
-snapshot_overview_export[, snapshot_time_vancouver := format_local(snapshot_time_vancouver)]
-snapshot_overview_export[, previous_snapshot_time_utc := format(previous_snapshot_time_utc, "%Y-%m-%d %H:%M:%S UTC")]
-
-fwrite(snapshot_overview_export, snapshot_overview_file)
-
-collection_gaps <- snapshot_overview[
-  !is.na(gap_minutes) & gap_minutes > gap_threshold_minutes,
-  .(
-    gap_start_utc = previous_snapshot_time_utc,
-    gap_end_utc = snapshot_time_utc,
-    gap_start_vancouver = with_tz(previous_snapshot_time_utc, local_tz),
-    gap_end_vancouver = with_tz(snapshot_time_utc, local_tz),
-    gap_minutes = round(gap_minutes, 2)
-  )
-]
-
-collection_gaps_export <- copy(collection_gaps)
-
-if (nrow(collection_gaps_export) > 0) {
-  collection_gaps_export[, gap_start_utc := format(gap_start_utc, "%Y-%m-%d %H:%M:%S UTC")]
-  collection_gaps_export[, gap_end_utc := format(gap_end_utc, "%Y-%m-%d %H:%M:%S UTC")]
-  collection_gaps_export[, gap_start_vancouver := format_local(gap_start_vancouver)]
-  collection_gaps_export[, gap_end_vancouver := format_local(gap_end_vancouver)]
-}
-
-fwrite(collection_gaps_export, collection_gaps_file)
-
-# ------------------------------------------------------------
-# Fahrzeugbezogene Lücken
-# ------------------------------------------------------------
-
-track_dt <- dt[
-  !is.na(vehicle_key) &
+    lon <= 180 &
+    !is.na(vehicle_key) &
     vehicle_key != ""
 ]
 
-setorder(track_dt, provider, vehicle_key, snapshot_time_utc)
+# Grober räumlicher Filter für Vancouver
+dt <- dt[
+  lat >= 49.15 &
+    lat <= 49.35 &
+    lon >= -123.30 &
+    lon <= -122.95
+]
 
-track_dt[
+dt <- unique(
+  dt,
+  by = c("provider", "vehicle_key", "lat", "lon", "snapshot_time_vancouver")
+)
+
+setorder(dt, provider, vehicle_key, snapshot_time_vancouver)
+
+# ------------------------------------------------------------
+# Zeitlücken erkennen und Liniensegmente bilden
+# ------------------------------------------------------------
+
+dt[
   ,
-  previous_time_utc := shift(snapshot_time_utc),
+  previous_time := shift(snapshot_time_vancouver),
   by = .(provider, vehicle_key)
 ]
 
-track_dt[
+dt[
   ,
-  previous_lat := shift(lat),
-  by = .(provider, vehicle_key)
-]
-
-track_dt[
-  ,
-  previous_lon := shift(lon),
-  by = .(provider, vehicle_key)
-]
-
-track_dt[
-  ,
-  vehicle_gap_minutes := as.numeric(
-    difftime(snapshot_time_utc, previous_time_utc, units = "mins")
+  gap_minutes := as.numeric(
+    difftime(snapshot_time_vancouver, previous_time, units = "mins")
   )
 ]
 
-vehicle_gaps <- track_dt[
-  !is.na(vehicle_gap_minutes) & vehicle_gap_minutes > gap_threshold_minutes,
-  .(
-    provider,
-    vehicle_key,
-    vehicle_id,
-    gap_start_utc = previous_time_utc,
-    gap_end_utc = snapshot_time_utc,
-    gap_start_vancouver = with_tz(previous_time_utc, local_tz),
-    gap_end_vancouver = with_tz(snapshot_time_utc, local_tz),
-    gap_minutes = round(vehicle_gap_minutes, 2),
-    previous_lat,
-    previous_lon,
-    next_lat = lat,
-    next_lon = lon
-  )
-]
-
-vehicle_gaps_export <- copy(vehicle_gaps)
-
-if (nrow(vehicle_gaps_export) > 0) {
-  vehicle_gaps_export[, gap_start_utc := format(gap_start_utc, "%Y-%m-%d %H:%M:%S UTC")]
-  vehicle_gaps_export[, gap_end_utc := format(gap_end_utc, "%Y-%m-%d %H:%M:%S UTC")]
-  vehicle_gaps_export[, gap_start_vancouver := format_local(gap_start_vancouver)]
-  vehicle_gaps_export[, gap_end_vancouver := format_local(gap_end_vancouver)]
-}
-
-fwrite(vehicle_gaps_export, vehicle_gaps_file)
-
-# ------------------------------------------------------------
-# Liniensegmente erzeugen
-# Wichtig:
-# Bei Lücken wird die Linie getrennt, damit keine falsche Verbindung entsteht.
-# ------------------------------------------------------------
-
-track_dt[
+dt[
   ,
   new_segment := fifelse(
-    is.na(vehicle_gap_minutes) | vehicle_gap_minutes <= gap_threshold_minutes,
+    is.na(gap_minutes) | gap_minutes <= gap_threshold_minutes,
     0L,
     1L
   )
 ]
 
-track_dt[
+dt[
   ,
   segment_id := cumsum(new_segment) + 1L,
   by = .(provider, vehicle_key)
 ]
 
-line_parts <- track_dt[
+# ------------------------------------------------------------
+# Linien-Daten vorbereiten
+# ------------------------------------------------------------
+
+line_dt <- dt[
   ,
-  {
-    ord <- order(snapshot_time_utc)
-    
-    lon_ordered <- lon[ord]
-    lat_ordered <- lat[ord]
-    time_ordered <- snapshot_time_utc[ord]
-    
-    line <- make_linestring_safe(lon_ordered, lat_ordered)
-    
-    if (is.null(line)) {
-      NULL
-    } else {
-      .(
-        vehicle_id = vehicle_id[ord][1],
-        n_points = length(time_ordered),
-        first_time_utc = min(time_ordered, na.rm = TRUE),
-        last_time_utc = max(time_ordered, na.rm = TRUE),
-        geometry = list(line)
-      )
-    }
-  },
+  .SD[order(snapshot_time_vancouver)],
   by = .(provider, vehicle_key, segment_id)
 ]
 
-if (nrow(line_parts) > 0) {
-  lines_sf <- st_sf(
-    line_parts[, .(
-      provider,
-      vehicle_key,
-      vehicle_id,
-      segment_id,
-      n_points,
-      first_time_utc,
-      last_time_utc
-    )],
-    geometry = st_sfc(line_parts$geometry, crs = 4326)
-  )
-  
-  lines_sf$popup <- paste0(
-    "<b>Fahrzeuglinie</b><br>",
-    "Provider: ", htmlEscape(lines_sf$provider), "<br>",
-    "Vehicle Key: ", htmlEscape(lines_sf$vehicle_key), "<br>",
-    "Vehicle ID: ", htmlEscape(lines_sf$vehicle_id), "<br>",
-    "Segment: ", lines_sf$segment_id, "<br>",
-    "Punkte: ", lines_sf$n_points, "<br>",
-    "Von: ", format_local(lines_sf$first_time_utc), "<br>",
-    "Bis: ", format_local(lines_sf$last_time_utc)
-  )
-} else {
-  lines_sf <- NULL
-}
-
-# ------------------------------------------------------------
-# Aktuelle Standorte: letzter Snapshot
-# ------------------------------------------------------------
-
-latest_snapshot_time <- max(dt$snapshot_time_utc, na.rm = TRUE)
-
-latest_points <- dt[
-  snapshot_time_utc == latest_snapshot_time
+line_dt[
+  ,
+  line_group := paste(provider, vehicle_key, segment_id, sep = "_")
 ]
 
-latest_points_sf <- st_as_sf(
-  latest_points,
-  coords = c("lon", "lat"),
-  crs = 4326,
-  remove = FALSE
-)
-
-latest_points_sf$popup <- paste0(
-  "<b>Letzter bekannter Standort</b><br>",
-  "Provider: ", htmlEscape(latest_points_sf$provider), "<br>",
-  "Vehicle Key: ", htmlEscape(latest_points_sf$vehicle_key), "<br>",
-  "Vehicle ID: ", htmlEscape(latest_points_sf$vehicle_id), "<br>",
-  "Lat: ", round(latest_points_sf$lat, 6), "<br>",
-  "Lon: ", round(latest_points_sf$lon, 6), "<br>",
-  "Zeit Vancouver: ", format_local(latest_points_sf$snapshot_time_utc)
-)
-
-# ------------------------------------------------------------
-# Karte bauen
-# ------------------------------------------------------------
-
-providers_all <- sort(unique(dt$provider))
-
-provider_palette <- colorFactor(
-  palette = c(
-    "#1b9e77",
-    "#d95f02",
-    "#7570b3",
-    "#e7298a",
-    "#66a61e",
-    "#e6ab02",
-    "#a6761d",
-    "#666666"
+# Nur Linien mit mindestens zwei verschiedenen Punkten
+valid_lines <- line_dt[
+  ,
+  .(
+    n_points = .N,
+    n_unique_positions = uniqueN(paste(lat, lon))
   ),
-  domain = providers_all
-)
+  by = line_group
+][
+  n_points >= 2 & n_unique_positions >= 2
+]
 
-min_time <- min(dt$snapshot_time_utc, na.rm = TRUE)
-max_time <- max(dt$snapshot_time_utc, na.rm = TRUE)
+line_dt <- line_dt[line_group %in% valid_lines$line_group]
 
-summary_html <- paste0(
-  "<div style='background:white; padding:10px; border-radius:6px; ",
-  "box-shadow:0 1px 5px rgba(0,0,0,0.35); font-size:13px;'>",
-  "<b>GBFS Vancouver</b><br>",
-  "Zeitraum:<br>",
-  format_local(min_time), "<br>",
-  "bis<br>",
-  format_local(max_time), "<br><br>",
-  "Letzter Snapshot:<br>",
-  format_local(latest_snapshot_time), "<br><br>",
-  "Fahrzeuge im letzten Snapshot: ",
-  nrow(latest_points), "<br>",
-  "Snapshot-Dateien: ",
-  length(files), "<br>",
-  "Sammellücken &gt; ",
-  gap_threshold_minutes,
-  " min: ",
-  nrow(collection_gaps), "<br>",
-  "Fahrzeuglücken &gt; ",
-  gap_threshold_minutes,
-  " min: ",
-  nrow(vehicle_gaps), "<br><br>",
-  "Berichte:<br>",
-  "collection_gaps.csv<br>",
-  "vehicle_gaps.csv",
-  "</div>"
-)
+# ------------------------------------------------------------
+# Animations-Daten vorbereiten
+# ------------------------------------------------------------
 
-m <- leaflet(options = leafletOptions(preferCanvas = TRUE)) %>%
-  addProviderTiles(providers$CartoDB.Positron) %>%
-  addControl(
-    html = summary_html,
-    position = "topright"
+dt[
+  ,
+  frame_time := format(snapshot_time_vancouver, "%Y-%m-%d %H:%M:%S")
+]
+
+dt[
+  ,
+  popup := paste0(
+    "Provider: ", provider,
+    "<br>Fahrzeug: ", vehicle_key,
+    "<br>Zeit Vancouver: ", frame_time,
+    "<br>Lat: ", round(lat, 6),
+    "<br>Lon: ", round(lon, 6)
   )
+]
 
-if (!is.null(lines_sf) && nrow(lines_sf) > 0) {
-  m <- m %>%
-    addPolylines(
-      data = lines_sf,
-      color = ~provider_palette(provider),
-      weight = 2,
-      opacity = 0.45,
-      smoothFactor = 1,
-      group = "Fahrzeuglinien",
-      popup = ~popup
+center_lat <- mean(dt$lat, na.rm = TRUE)
+center_lon <- mean(dt$lon, na.rm = TRUE)
+
+
+for (current_frame in frame_labels) {
+  current_points <- dt_gif_plot[dt_gif_plot$frame_label == current_frame, ]
+  
+  p <- base_plot +
+    geom_point(
+      data = current_points,
+      aes(
+        x = lon,
+        y = lat,
+        color = provider
+      ),
+      size = 1.8,
+      alpha = 0.9
+    ) +
+    labs(
+      subtitle = paste("Zeit:", current_frame)
+    )
+  
+  print(p)
+  Sys.sleep(0.35)
+}
+
+
+# ------------------------------------------------------------
+# Karte erstellen
+# ------------------------------------------------------------
+
+fig <- plot_ly()
+
+# Hintergrund-Linien einzeichnen
+if (nrow(line_dt) > 0) {
+  fig <- fig %>%
+    add_trace(
+      data = line_dt,
+      type = "scattermapbox",
+      mode = "lines",
+      lat = ~lat,
+      lon = ~lon,
+      split = ~line_group,
+      color = ~provider,
+      line = list(width = 2),
+      opacity = 0.35,
+      hoverinfo = "none",
+      showlegend = FALSE
     )
 }
 
-m <- m %>%
-  addCircleMarkers(
-    data = latest_points_sf,
-    lng = ~lon,
+# Animierte Punkte einzeichnen
+fig <- fig %>%
+  add_trace(
+    data = dt,
+    type = "scattermapbox",
+    mode = "markers",
     lat = ~lat,
-    radius = 5,
-    color = ~provider_palette(provider),
-    fillColor = ~provider_palette(provider),
-    fillOpacity = 0.9,
-    stroke = TRUE,
-    weight = 1,
-    group = "Letzte Standorte",
-    popup = ~popup
+    lon = ~lon,
+    frame = ~frame_time,
+    color = ~provider,
+    text = ~popup,
+    hoverinfo = "text",
+    marker = list(
+      size = 10,
+      opacity = 0.9
+    )
   ) %>%
-  addLegend(
-    position = "bottomright",
-    pal = provider_palette,
-    values = providers_all,
-    title = "Provider"
+  layout(
+    title = "Animierte GBFS-Bewegungen mit Fahrzeuglinien",
+    mapbox = list(
+      style = "carto-positron",
+      center = list(
+        lat = center_lat,
+        lon = center_lon
+      ),
+      zoom = 12
+    ),
+    margin = list(l = 0, r = 0, t = 50, b = 0),
+    legend = list(
+      orientation = "h",
+      x = 0.02,
+      y = 0.98,
+      bgcolor = "rgba(255,255,255,0.8)"
+    )
   ) %>%
-  addLayersControl(
-    overlayGroups = c("Fahrzeuglinien", "Letzte Standorte"),
-    options = layersControlOptions(collapsed = FALSE)
+  animation_opts(
+    frame = 900,
+    transition = 250,
+    redraw = FALSE
+  ) %>%
+  animation_slider(
+    currentvalue = list(
+      prefix = "Zeit Vancouver: "
+    )
+  ) %>%
+  animation_button(
+    x = 0.05,
+    y = 0,
+    xanchor = "left",
+    yanchor = "bottom"
   )
 
-saveWidget(
-  m,
-  file = map_file,
+# ------------------------------------------------------------
+# Speichern
+# ------------------------------------------------------------
+
+htmlwidgets::saveWidget(
+  fig,
+  file = output_file,
   selfcontained = TRUE
 )
 
 message("Fertig.")
-message("Karte gespeichert unter: ", map_file)
-message("Sammellücken gespeichert unter: ", collection_gaps_file)
-message("Fahrzeuglücken gespeichert unter: ", vehicle_gaps_file)
-message("Snapshot-Übersicht gespeichert unter: ", snapshot_overview_file)
+message("Animierte Karte gespeichert unter: ", output_file)
